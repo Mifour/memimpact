@@ -17,7 +17,6 @@ jobs:
       matrix:
         target:
           - x86_64-unknown-linux-musl
-          - aarch64-unknown-linux-musl
 
     steps:
       - name: Checkout repository
@@ -26,6 +25,7 @@ jobs:
       - name: Install Rust
         uses: dtolnay/rust-toolchain@v1
         with:
+          toolchain: stable
           targets: ${{ matrix.target }}
 
       - name: Install MUSL tools
@@ -43,8 +43,6 @@ jobs:
           # Normalize platform name
           if [ "$TARGET" = "x86_64-unknown-linux-musl" ]; then
             OUT="memimpact-x86_64"
-          elif [ "$TARGET" = "aarch64-unknown-linux-musl" ]; then
-            OUT="memimpact-aarch64"
           fi
 
           cp target/${TARGET}/release/${BIN_NAME} artifacts/${OUT}
@@ -53,7 +51,9 @@ jobs:
         run: |
           cd artifacts
           for file in *; do
-            sha256sum "$file" > "$file.sha256";
+            if [[ "$file" != *.sha256 ]]; then
+              sha256sum "$file" > "$file.sha256"
+            fi
           done
 
       - name: Upload binary artifact (for release step)
