@@ -1,7 +1,18 @@
 [package]
 name = "memimpact"
+description = "measure the memory impact of any PID and its children processes on any linux."
 authors = ["mifour"]
 version = "0.0.1"
 edition = "2024"
+license = "MIT"
+repository = "https://github.com/Mifour/memimpact"
+homepage = "https://github.com/Mifour/memimpact"
+readme = "README.md"
+categories = ["command-line-utilities"]
+keywords = ["memory", "profiling", "cli", "monitor", "linux"]
+
+[[bin]]
+name = "memimpact"
+path = "src/main.rs"
 
 [dependencies]
