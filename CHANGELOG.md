@@ -5,6 +5,9 @@ All notable changes to **MemImpact** will be documented in this file.
 This project adheres to [Semantic Versioning](https://semver.org/).
 
 ---
+## [0.0.2] — 2025-11-23
+### Fixed
+- Added release GitHub Actions workflow (now active)
 
 ## [0.0.1] — 2025-11-23
 ### Added
