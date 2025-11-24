@@ -25,8 +25,11 @@ Perfect for easy benchmarking, profiling, or simply understanding how much RAM y
 
 ```sh
 cargo install --git https://github.com/mifour/memimpact
-
-
+```
+or
+```sh
+cargo install memimpact
+```
 ### **Option 2 — Download a Prebuilt Binary**
 
 Go to:
