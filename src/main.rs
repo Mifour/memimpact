@@ -1,5 +1,6 @@
 use std::collections::{HashMap, HashSet};
 use std::{env, fs, process};
+use std::io::{self, Write};
 use std::time::Duration;
 use std::thread;
 
@@ -151,18 +152,50 @@ fn format_memory(value: u64) -> String{
 }
 
 
+enum Output {
+	// to handle either stdout or a file
+    File(fs::File),
+    Stdout(io::Stdout),
+}
+
+impl Write for Output {
+    fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+        match self {
+            Self::File(f) => f.write(buf),
+            Self::Stdout(s) => s.write(buf),
+        }
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        match self {
+            Self::File(f) => f.flush(),
+            Self::Stdout(s) => s.flush(),
+        }
+    }
+}
+
+
+fn write_output<W: Write>(mut out: W, text: String){
+    match out.write_all(text.as_bytes()){
+		Ok(_) => (),
+		Err(e) => {eprintln!("Could not write output because {}", e);}
+    };
+}
+
+
 fn main() {
     let args: Vec<String> = env::args().collect();
     if args.len() == 2 && args[1] == "--help"{
     	let version = env!("CARGO_PKG_VERSION");
     	println!(
-    		"Memimpact -- measure the memory impact of any PID and its children processes.\n\
-    		Version: {}\n\
-    		Usage: memimpact <options> <pid>\n\
-    		Options:\n\
-    		--hertz int, the desired number of iterations per second\n\
-    		Flags:\n\
-    		--final, display only 1 line with the max value",
+			"Memimpact -- measure the memory impact of any PID and its children processes.\n\
+			Version: {}\n\
+			Usage: memimpact <options> <pid>\n\
+			Options:\n\
+			--hertz int, the desired number of iterations per second\n\
+			--output-file str, the file path where to write the output (stdout if absent)\n\
+			Flags:\n\
+			--final, display only 1 line with the max value",
     		version
     	);
     	process::exit(0);
@@ -178,12 +211,19 @@ fn main() {
     }
     let sleep_duration: u64 = 1000 / hz;
 
+    let output_index = args.iter().position(|arg| arg == "--output-file");
+    let mut output = if output_index.is_some_and(|index| args.len() > index) {
+		Output::File(fs::File::create(args[output_index.unwrap() + 1].clone()).expect("Could not open output file"))
+    } else{
+		Output::Stdout(io::stdout())
+    };
+
     let target_pid: i32 = args[args.len() -1].parse().expect("Invalid integer value for PID");
 
     let process_name: String = get_process_name(&target_pid);
 
 	if print_flag{
-	    println!("Tracking memory usage of PID {} {}", target_pid, process_name);
+	    write_output(&mut output, format!("Tracking memory usage of PID {} {}\n", target_pid, process_name));
 	}
 
     let mut max: u64 = 0;
@@ -201,10 +241,10 @@ fn main() {
         let display_current = format_memory(current);
         let display_max = format_memory(max);
         if print_flag{
-	        println!("PID {} {}: current {}, max {}", target_pid, process_name, display_current, display_max );
+	        write_output(&mut output, format!("PID {} {}: current {}, max {}\n", target_pid, process_name, display_current, display_max ));
 	    }
         thread::sleep(Duration::from_millis(sleep_duration));
     }
     let display_max = format_memory(max);
-    println!("PID {} {}: max {}", target_pid, process_name, display_max );
+    write_output(&mut output, format!("PID {} {}: max {}\n", target_pid, process_name, display_max ));
 }
