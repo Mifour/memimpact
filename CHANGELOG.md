@@ -5,6 +5,9 @@ All notable changes to **MemImpact** will be documented in this file.
 This project adheres to [Semantic Versioning](https://semver.org/).
 
 ---
+## [unreleased] — 2025-11-27
+### Feature
+- Add --output-file option to output in a designated file instead, stdout by default
 ## [0.0.3] — 2025-11-23
 ### Fixed
 - Fixed the github release workflow
