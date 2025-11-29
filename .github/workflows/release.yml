@@ -17,6 +17,7 @@ jobs:
       matrix:
         target:
           - x86_64-unknown-linux-musl
+          - aarch64-unknown-linux-musl
 
     steps:
       - name: Checkout repository
@@ -28,11 +29,12 @@ jobs:
           toolchain: stable
           targets: ${{ matrix.target }}
 
-      - name: Install MUSL tools
-        run: sudo apt-get update && sudo apt-get install -y musl-tools
+      - name: Install cross
+        run: cargo install cross
 
-      - name: Build release binary
-        run: cargo build --release --target ${{ matrix.target }}
+
+      - name: Cross Build release binary
+        run: cross build --release --target ${{ matrix.target }}
 
       - name: Rename binary
         run: |
@@ -43,6 +45,8 @@ jobs:
           # Normalize platform name
           if [ "$TARGET" = "x86_64-unknown-linux-musl" ]; then
             OUT="memimpact-x86_64"
+          elif [ "$TARGET" = "aarch64-unknown-linux-musl" ]; then
+            OUT="memimpact-aarch64"
           fi
 
           cp target/${TARGET}/release/${BIN_NAME} artifacts/${OUT}
