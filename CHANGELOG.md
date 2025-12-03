@@ -5,6 +5,11 @@ All notable changes to **MemImpact** will be documented in this file.
 This project adheres to [Semantic Versioning](https://semver.org/).
 
 ---
+## [0.0.5] — 2025-12-03
+### Fixed
+- Fixed a bug with children process that caused memimpact enter an infinite loop
+
+
 ## [0.0.4] — 2025-11-29
 ### Chore
 - add aarch64 binary release on github

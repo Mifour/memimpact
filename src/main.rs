@@ -111,8 +111,9 @@ fn find_descendants(
 	// return all descendants of the target (including the target itself)
     let mut descendants = HashSet::new();
     descendants.insert(target_pid);
-	let mut found_new = false;
+	let mut found_new: bool;
     loop {
+    	found_new = false;
         for (&pid, &ppid) in parent_of.iter() {
         	// if the parent process is among descendants and we don't already know the current pid
             if descendants.contains(&ppid) && !descendants.contains(&pid) {
