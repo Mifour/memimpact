@@ -5,12 +5,8 @@ use std::time::Duration;
 use std::thread;
 
 
-#[derive(Debug)]
-enum ProcStatError {
-    InvalidFormat,
-    UnsupportedKernelLayout,
-}
-
+// TODO: get the page size dynamically
+const PAGE_SIZE_KB: u64 = 4; // 4096 bytes = 4 KB
 
 fn list_processes() -> Vec<i32> {
     let mut pids = Vec::new();
@@ -29,8 +25,62 @@ fn list_processes() -> Vec<i32> {
     pids
 }
 
+#[derive(Debug, PartialEq)]
+enum ProcessState{
+	R,      //Running
+    S,      //Sleeping in an interruptible wait
+    D,      //Waiting in uninterruptible disk sleep
+    Z,      //Zombie
+    T,      //Stopped (on a signal) or (before Linux2.6.33) trace stopped or Tracing stop (Linux 2.6.33 onward)
+    W,      //Paging (only before Linux 2.6.0) or Waking (Linux 2.6.33 to 3.13 only)
+    X,      //Dead (from Linux 2.6.0 onward)
+    K,      //Wakekill (Linux 2.6.33 to 3.13 only)
+    P,      //Parked (Linux 3.9 to 3.13 only)
+    I,      //Idle (Linux 4.14 onward)
+}
 
-fn parse_proc_stat(content: &str) -> Result<Vec<&str>, ProcStatError> {
+
+impl TryFrom<&str> for ProcessState {
+    type Error = ProcStatError;
+
+    fn try_from(s: &str) -> Result<Self, Self::Error> {
+        match s.chars().next().ok_or('_') {
+            Ok('R') => Ok(ProcessState::R),
+            Ok('S') => Ok(ProcessState::S),
+            Ok('D') => Ok(ProcessState::D),
+            Ok('Z') => Ok(ProcessState::Z),
+            Ok('T') => Ok(ProcessState::T),
+            Ok('W') => Ok(ProcessState::W),
+            Ok('X') => Ok(ProcessState::X),
+            Ok('K') => Ok(ProcessState::K),
+            Ok('P') => Ok(ProcessState::P),
+            Ok('I') => Ok(ProcessState::I),
+            _ => Err(ProcStatError::UnsupportedKernelLayout),
+        }
+    }
+}
+
+
+
+#[derive(Debug, PartialEq)]
+#[allow(dead_code)]
+struct ProcStat<'a>{
+    pid: i32,
+    comm: &'a str,
+    state: ProcessState,
+    ppid: i32,
+}
+
+
+#[derive(Debug)]
+enum ProcStatError {
+    InvalidFormat,
+    UnsupportedKernelLayout,
+}
+
+
+
+fn parse_proc_stat(content: &str) -> Result<ProcStat<'_>, ProcStatError> {
 	// because the 2nd colum is the process name and can contain whitespaces
 	// see https://man7.org/linux/man-pages/man5/proc_pid_stat.5.html
     let mut res = Vec::new();
@@ -46,26 +96,36 @@ fn parse_proc_stat(content: &str) -> Result<Vec<&str>, ProcStatError> {
         return Err(ProcStatError::InvalidFormat);
     }
     res.push(&content[..open - 1]);
+	let pid: i32 = match content[..open - 1].parse(){
+		Ok(i) => i,
+		Err(_) => return Err(ProcStatError::InvalidFormat)
+	};
 
-    // comm
-    res.push(&content[open..=close]);
+	// comm
+    let comm = &content[open..=close];
 
+	// state
     let after_comm = close + 2;
-    let rest: Vec<&str> = content[after_comm..].split_whitespace().collect();
+    let state = match ProcessState::try_from(&content[after_comm..after_comm + 1]){
+    	Ok(s) => s,
+    	Err(_) => return Err(ProcStatError::UnsupportedKernelLayout)
+    };
 
-    if rest.is_empty() {
-        return Err(ProcStatError::UnsupportedKernelLayout);
-    }
-
-    res.extend(rest);
-    Ok(res)
+    // ppid
+    let next_space = content[after_comm + 2..].find(' ').ok_or(ProcStatError::InvalidFormat)?;
+	let ppid: i32 = match content[after_comm + 2..after_comm + 2 + next_space].parse(){
+		Ok(i) => i,
+		Err(_) => return Err(ProcStatError::InvalidFormat)
+	};
+    
+    Ok(ProcStat{pid, comm, state, ppid})
 }
 
 fn get_process_name(pid: i32) -> Result<String, String> {
     let path = format!("/proc/{}/stat", pid);
     let contents = fs::read_to_string(&path)
    	        .map_err(|_| format!("Could not read {}", path))?;
-    let parts = parse_proc_stat(&contents).map_err(|e| {
+    let proc_stat = parse_proc_stat(&contents).map_err(|e| {
         format!(
             "Unsupported /proc/{}/stat format ({:?}). \
              Your system is currently not supported. \
@@ -74,7 +134,7 @@ fn get_process_name(pid: i32) -> Result<String, String> {
         )
     })?;
 
-    Ok(parts[1].to_string())
+    Ok(proc_stat.comm.to_string())
 }
 
 
@@ -88,40 +148,41 @@ fn get_map_pid_to_ppid() -> HashMap<i32, i32> {
     		Ok(c) => {c},
     		Err(_) => {continue} // probably the process exited	
     	};
-    	let parts = match parse_proc_stat(&contents) {
+    	let proc_stat = match parse_proc_stat(&contents) {
 	        Ok(p) => p,
 	        Err(_) => continue, // unsupported or malformed stat for this PID
 	    };
-	    // TODO: kinda redundant. A refactor of parse_proc_stat with a proper ProcStat struct would help.
-    	if parts.len() < 5 {
-    		continue;
-    	}
-   	    let ppid: i32 = match parts[4].parse::<i32>(){
-   	    	Ok(ppid) => {ppid},
-   	    	Err(_) => continue,
-   	    };
-   	    map.insert(pid, ppid);
+   	    map.insert(proc_stat.pid, proc_stat.ppid);
     }
     map
 }
 
 
-fn parse_statm(contents: String) -> Option<u64> {
-    let parts: Vec<&str> = contents.split_whitespace().collect();
-    if parts.len() < 2 {
-        return None;
-    }
-    let rss_pages: u64 = match parts[1].parse::<u64>() {
-        Ok(n) => n,
-        Err(_) => return None,
-    };
-    // TODO: get the page size dynamically
-    let page_size_kb = 4; // 4096 bytes = 4 KB
-    Some(rss_pages * page_size_kb)
+#[derive(Debug)]
+enum ProcStatmError {
+    InvalidFormat,
 }
 
 
-fn read_rss_kb(pid: &i32) -> Option<u64>{
+fn parse_statm(content: String) -> Result<u64, ProcStatmError> {
+	let first_space = match content.find(' ').ok_or(ProcStatmError::InvalidFormat){
+		Ok(i) => i,
+		Err(_) => return Err(ProcStatmError::InvalidFormat)
+	};
+	let next_space = match content[first_space + 1..].find(' ').ok_or(ProcStatmError::InvalidFormat){
+		Ok(i) => i,
+		Err(_) => return Err(ProcStatmError::InvalidFormat)
+	};
+    let rss_pages: u64 = match content[first_space + 1..first_space + 1 + next_space].parse::<u64>() {
+        Ok(n) => n,
+        Err(_) => return Err(ProcStatmError::InvalidFormat),
+    };
+
+    Ok(rss_pages * PAGE_SIZE_KB)
+}
+
+
+fn read_rss_kb(pid: &i32) -> u64{
     // see https://man7.org/linux/man-pages/man5/proc_pid_statm.5.html
     let path = format!("/proc/{}/statm", pid);
     /*
@@ -131,9 +192,9 @@ fn read_rss_kb(pid: &i32) -> Option<u64>{
     */
     let contents = match fs::read_to_string(path) {
         Ok(c) => c,
-        Err(_) => return None,
+        Err(_) => return 0,
     };
-    parse_statm(contents)
+    parse_statm(contents).unwrap_or(0)
 }	
 
 
@@ -264,7 +325,7 @@ fn main() {
         	break;
         }
         let target_descendants = find_descendants(&mapping, target_pid);
-        current = target_descendants.iter().map(|pid| read_rss_kb(pid).unwrap_or(0)).sum();
+        current = target_descendants.iter().map(read_rss_kb).sum();
         
         max = max.max(current);
         let display_current = format_memory(current);
@@ -288,36 +349,19 @@ mod tests {
     #[test]
     fn test_parse_proc_stat_basic() {
         let input = "1234 (bash) R 1 2 3 4";
-        let actual = parse_proc_stat(input).ok();
+        let actual = parse_proc_stat(input).unwrap();
 
-        let expected = vec![
-            "1234",
-            "(bash)",
-            "R",
-            "1",
-            "2",
-            "3",
-            "4",
-        ];
-
-        assert_eq!(actual, Some(expected));
+        let expected = ProcStat{pid: 1234, comm: "(bash)", state: ProcessState::R, ppid: 1};
+        assert_eq!(actual, expected);
     }
 
     #[test]
     fn test_parse_proc_stat_with_spaces_in_name() {
         let input = "5678 (my fancy process) S 10 20 30";
-        let actual = parse_proc_stat(input).ok();
+        let actual = parse_proc_stat(input).unwrap();
 
-        let expected = vec![
-            "5678",
-            "(my fancy process)",
-            "S",
-            "10",
-            "20",
-            "30",
-        ];
-
-        assert_eq!(actual, Some(expected));
+        let expected = ProcStat{pid: 5678, comm: "(my fancy process)", state: ProcessState::S, ppid: 10};
+        assert_eq!(actual, expected);
     }
 
 
@@ -383,12 +427,12 @@ mod tests {
     #[test]
     fn test_parse_statm_valid() {
         let input = "100 50 0 0 0 0 0";
-        assert_eq!(parse_statm(input.to_string()), Some(200));
+        assert_eq!(parse_statm(input.to_string()).ok(), Some(200));
     }
 
     #[test]
     fn test_parse_statm_invalid() {
-        assert_eq!(parse_statm("invalid".to_string()), None);
+        assert!(parse_statm("invalid".to_string()).is_err());
     }
 
     #[test]

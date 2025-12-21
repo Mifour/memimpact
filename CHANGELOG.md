@@ -5,6 +5,11 @@ All notable changes to **MemImpact** will be documented in this file.
 This project adheres to [Semantic Versioning](https://semver.org/).
 
 ---
+## [0.0.6] — 2025-12-21
+### Improvements
+- Refactored the parsing of proc/{}/stat and proc/{}/statm files
+- Stronger validation and better error handling
+
 ## [0.0.5] — 2025-12-03
 ### Fixed
 - Fixed a bug with children process that caused memimpact enter an infinite loop
