@@ -5,6 +5,13 @@ use std::time::Duration;
 use std::thread;
 
 
+#[derive(Debug)]
+enum ProcStatError {
+    InvalidFormat,
+    UnsupportedKernelLayout,
+}
+
+
 fn list_processes() -> Vec<i32> {
     let mut pids = Vec::new();
 
@@ -23,39 +30,53 @@ fn list_processes() -> Vec<i32> {
 }
 
 
-fn parse_proc_stat(content: &str) -> Vec<&str>{
+fn parse_proc_stat(content: &str) -> Result<Vec<&str>, ProcStatError> {
 	// because the 2nd colum is the process name and can contain whitespaces
 	// see https://man7.org/linux/man-pages/man5/proc_pid_stat.5.html
-	let mut res = Vec::<&str>::new();
-	let open = match content.find('(') {
-        Some(i) => i,
-        None => return res,
-    };
-    res.push(&content[0..open - 1]);
-    let close = match content[open + 1..].find(')') {
-        Some(i) => open + 1 + i,
-        None => return res,
-    };
-    res.push(&content[open..close + 1]);
+    let mut res = Vec::new();
+
+    let open = content.find('(').ok_or(ProcStatError::InvalidFormat)?;
+    let close = content[open + 1..]
+        .find(')')
+        .map(|i| open + 1 + i)
+        .ok_or(ProcStatError::InvalidFormat)?;
+
+    // pid
+    if open < 2 {
+        return Err(ProcStatError::InvalidFormat);
+    }
+    res.push(&content[..open - 1]);
+
+    // comm
+    res.push(&content[open..=close]);
+
     let after_comm = close + 2;
-
     let rest: Vec<&str> = content[after_comm..].split_whitespace().collect();
-	res.extend(rest);
-    res
+
+    if rest.is_empty() {
+        return Err(ProcStatError::UnsupportedKernelLayout);
+    }
+
+    res.extend(rest);
+    Ok(res)
 }
 
-fn get_process_name(pid: &i32) -> String{
-	let path = format!("/proc/{}/stat", pid);
-   	let contents = match fs::read_to_string(path){
-   		Ok(string_content) => {string_content},
-   		Err(_) => {panic!("could not read process name for pid {}", pid)}	
-   	};
-   	let parts: Vec<&str> = parse_proc_stat(&contents);
-   	if parts.len() < 2{
-   		panic!("could not get the process name for stat: {:?}", parts);
-   	}
-   	parts[1].to_string()
+fn get_process_name(pid: i32) -> Result<String, String> {
+    let path = format!("/proc/{}/stat", pid);
+    let contents = fs::read_to_string(&path)
+   	        .map_err(|_| format!("Could not read {}", path))?;
+    let parts = parse_proc_stat(&contents).map_err(|e| {
+        format!(
+            "Unsupported /proc/{}/stat format ({:?}). \
+             Your system is currently not supported. \
+             Please open an issue with your kernel version.",
+            pid, e
+        )
+    })?;
+
+    Ok(parts[1].to_string())
 }
+
 
 fn get_map_pid_to_ppid() -> HashMap<i32, i32> {
     // list directories insde /proc and foreach read its stat
@@ -64,20 +85,22 @@ fn get_map_pid_to_ppid() -> HashMap<i32, i32> {
     for pid in list_processes(){
     	let path = format!("/proc/{}/stat", pid);
     	let contents = match fs::read_to_string(path){
-    		Ok(string_content) => {string_content},
+    		Ok(c) => {c},
     		Err(_) => {continue} // probably the process exited	
     	};
-    	// TODO: Parse /proc/<pid>/stat manually to avoid allocations
-    	let parts: Vec<&str> = parse_proc_stat(&contents);
-    	if parts.len() >= 5 {
-    	    let ppid: i32 = match parts[4].parse::<i32>(){
-    	    	Ok(ppid_int) => {ppid_int},
-    	    	Err(error) => {
-    	    	    panic!("cannot parse {:?} from {:?} got error {:?}", parts[4], &parts[..10], error)
-    	    	}
-    	    };
-    	    map.insert(pid, ppid);
+    	let parts = match parse_proc_stat(&contents) {
+	        Ok(p) => p,
+	        Err(_) => continue, // unsupported or malformed stat for this PID
+	    };
+	    // TODO: kinda redundant. A refactor of parse_proc_stat with a proper ProcStat struct would help.
+    	if parts.len() < 5 {
+    		continue;
     	}
+   	    let ppid: i32 = match parts[4].parse::<i32>(){
+   	    	Ok(ppid) => {ppid},
+   	    	Err(_) => continue,
+   	    };
+   	    map.insert(pid, ppid);
     }
     map
 }
@@ -88,7 +111,10 @@ fn parse_statm(contents: String) -> Option<u64> {
     if parts.len() < 2 {
         return None;
     }
-    let rss_pages: u64 = parts[1].parse::<u64>().ok()?;
+    let rss_pages: u64 = match parts[1].parse::<u64>() {
+        Ok(n) => n,
+        Err(_) => return None,
+    };
     // TODO: get the page size dynamically
     let page_size_kb = 4; // 4096 bytes = 4 KB
     Some(rss_pages * page_size_kb)
@@ -103,7 +129,10 @@ fn read_rss_kb(pid: &i32) -> Option<u64>{
     Trick 2: Use std::fs::read instead of read_to_string
     read_to_string incurs UTF-8 validation — wasteful since /proc is ASCII.
     */
-    let contents = fs::read_to_string(path).ok()?;
+    let contents = match fs::read_to_string(path) {
+        Ok(c) => c,
+        Err(_) => return None,
+    };
     parse_statm(contents)
 }	
 
@@ -135,26 +164,15 @@ fn find_descendants(
 
 
 fn format_memory(value: u64) -> String{
-	let mut current = value;
-	let mut power: u32 = 3; // start in KB
-	while current > 1024{
-		current >>= 10; // divide by 1024
-		power += 3;
-		if power > 21{
-			panic!("format_memory is stuck in while loop");
-		}
-	}
-	let unit_str = match power {
-		3 => {"KB"},
-		6 => {"MB"},
-		9 => {"GB"},
-		12 => {"TB"},
-		15 => {"PB"},
-		18 => {"EB"}, 
-		21 => {"ZB"},
-		_ => {panic!("unit name for power {} is not supported for conversion", power)}  // impossible with a u64, value would be > than u64 max
-	};
-	format!("{}{}", current, unit_str).to_string()
+	// every possible u64 values are handled, it is impossible to be stuck in an infinite loop
+	const UNITS: [&str; 7] = ["KB", "MB", "GB", "TB", "PB", "EB", "ZB"];
+    let mut current = value;
+    let mut unit_index = 0;
+    while current >= 1024 && unit_index < UNITS.len() - 1 {
+        current >>= 10;
+        unit_index += 1;
+    }
+    format!("{}{}", current, UNITS[unit_index])
 }
 
 
@@ -226,8 +244,13 @@ fn main() {
 
     let target_pid: i32 = args[args.len() -1].parse().expect("Invalid integer value for PID");
 
-    let process_name: String = get_process_name(&target_pid);
-
+    let process_name = match get_process_name(target_pid) {
+	    Ok(name) => name,
+	    Err(msg) => {
+	        eprintln!("memimpact error: {}", msg);
+	        process::exit(1);
+	    }
+	};
 	if print_flag{
 	    write_output(&mut output, format!("Tracking memory usage of PID {} {}\n", target_pid, process_name));
 	}
@@ -265,7 +288,7 @@ mod tests {
     #[test]
     fn test_parse_proc_stat_basic() {
         let input = "1234 (bash) R 1 2 3 4";
-        let actual = parse_proc_stat(input);
+        let actual = parse_proc_stat(input).ok();
 
         let expected = vec![
             "1234",
@@ -277,13 +300,13 @@ mod tests {
             "4",
         ];
 
-        assert_eq!(actual, expected);
+        assert_eq!(actual, Some(expected));
     }
 
     #[test]
     fn test_parse_proc_stat_with_spaces_in_name() {
         let input = "5678 (my fancy process) S 10 20 30";
-        let actual = parse_proc_stat(input);
+        let actual = parse_proc_stat(input).ok();
 
         let expected = vec![
             "5678",
@@ -294,7 +317,7 @@ mod tests {
             "30",
         ];
 
-        assert_eq!(actual, expected);
+        assert_eq!(actual, Some(expected));
     }
 
 
@@ -303,7 +326,7 @@ mod tests {
         let input = "9999 bash R 1 2 3";
         let parts = parse_proc_stat(input);
 
-        assert!(parts.is_empty());
+        assert!(parts.is_err());
     }
 
     #[test]
