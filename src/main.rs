@@ -5,6 +5,9 @@ use std::time::Duration;
 use std::thread;
 
 
+// TODO: get the page size dynamically
+const PAGE_SIZE_KB: u64 = 4; // 4096 bytes = 4 KB
+
 fn list_processes() -> Vec<i32> {
     let mut pids = Vec::new();
 
@@ -149,38 +152,37 @@ fn get_map_pid_to_ppid() -> HashMap<i32, i32> {
 	        Ok(p) => p,
 	        Err(_) => continue, // unsupported or malformed stat for this PID
 	    };
-	    // TODO: kinda redundant. A refactor of parse_proc_stat with a proper ProcStat struct would help.
-		/*
-    	if parts.len() < 5 {
-    		continue;
-    	}
-   	    let ppid: i32 = match parts[4].parse::<i32>(){
-   	    	Ok(ppid) => {ppid},
-   	    	Err(_) => continue,
-   	    };
-   	    */
    	    map.insert(proc_stat.pid, proc_stat.ppid);
     }
     map
 }
 
 
-fn parse_statm(contents: String) -> Option<u64> {
-    let parts: Vec<&str> = contents.split_whitespace().collect();
-    if parts.len() < 2 {
-        return None;
-    }
-    let rss_pages: u64 = match parts[1].parse::<u64>() {
-        Ok(n) => n,
-        Err(_) => return None,
-    };
-    // TODO: get the page size dynamically
-    let page_size_kb = 4; // 4096 bytes = 4 KB
-    Some(rss_pages * page_size_kb)
+#[derive(Debug)]
+enum ProcStatmError {
+    InvalidFormat,
 }
 
 
-fn read_rss_kb(pid: &i32) -> Option<u64>{
+fn parse_statm(content: String) -> Result<u64, ProcStatmError> {
+	let first_space = match content.find(' ').ok_or(ProcStatmError::InvalidFormat){
+		Ok(i) => i,
+		Err(_) => return Err(ProcStatmError::InvalidFormat)
+	};
+	let next_space = match content[first_space + 1..].find(' ').ok_or(ProcStatmError::InvalidFormat){
+		Ok(i) => i,
+		Err(_) => return Err(ProcStatmError::InvalidFormat)
+	};
+    let rss_pages: u64 = match content[first_space + 1..first_space + 1 + next_space].parse::<u64>() {
+        Ok(n) => n,
+        Err(_) => return Err(ProcStatmError::InvalidFormat),
+    };
+
+    Ok(rss_pages * PAGE_SIZE_KB)
+}
+
+
+fn read_rss_kb(pid: &i32) -> u64{
     // see https://man7.org/linux/man-pages/man5/proc_pid_statm.5.html
     let path = format!("/proc/{}/statm", pid);
     /*
@@ -190,9 +192,9 @@ fn read_rss_kb(pid: &i32) -> Option<u64>{
     */
     let contents = match fs::read_to_string(path) {
         Ok(c) => c,
-        Err(_) => return None,
+        Err(_) => return 0,
     };
-    parse_statm(contents)
+    parse_statm(contents).unwrap_or(0)
 }	
 
 
@@ -323,7 +325,7 @@ fn main() {
         	break;
         }
         let target_descendants = find_descendants(&mapping, target_pid);
-        current = target_descendants.iter().map(|pid| read_rss_kb(pid).unwrap_or(0)).sum();
+        current = target_descendants.iter().map(read_rss_kb).sum();
         
         max = max.max(current);
         let display_current = format_memory(current);
@@ -425,12 +427,12 @@ mod tests {
     #[test]
     fn test_parse_statm_valid() {
         let input = "100 50 0 0 0 0 0";
-        assert_eq!(parse_statm(input.to_string()), Some(200));
+        assert_eq!(parse_statm(input.to_string()).ok(), Some(200));
     }
 
     #[test]
     fn test_parse_statm_invalid() {
-        assert_eq!(parse_statm("invalid".to_string()), None);
+        assert!(parse_statm("invalid".to_string()).is_err());
     }
 
     #[test]
