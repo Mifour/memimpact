@@ -1,6 +1,7 @@
 use std::collections::{HashMap, HashSet};
 use std::{env, fs, process};
 use std::io::{self, Write};
+use std::path::PathBuf;
 use std::time::Duration;
 use std::thread;
 
@@ -77,7 +78,6 @@ enum ProcStatError {
     InvalidFormat,
     UnsupportedKernelLayout,
 }
-
 
 
 fn parse_proc_stat(content: &str) -> Result<ProcStat<'_>, ProcStatError> {
@@ -237,8 +237,14 @@ fn format_memory(value: u64) -> String{
 }
 
 
+#[derive(Debug)]
+enum OutputSpec {
+    Stdout,
+    File(PathBuf),
+}
+
+#[derive(Debug)]
 enum Output {
-	// to handle either stdout or a file
     File(fs::File),
     Stdout(io::Stdout),
 }
@@ -246,15 +252,15 @@ enum Output {
 impl Write for Output {
     fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
         match self {
-            Self::File(f) => f.write(buf),
-            Self::Stdout(s) => s.write(buf),
+            Output::File(f) => f.write(buf),
+            Output::Stdout(s) => s.write(buf),
         }
     }
 
     fn flush(&mut self) -> io::Result<()> {
         match self {
-            Self::File(f) => f.flush(),
-            Self::Stdout(s) => s.flush(),
+            Output::File(f) => f.flush(),
+            Output::Stdout(s) => s.flush(),
         }
     }
 }
@@ -268,9 +274,87 @@ fn write_output<W: Write>(mut out: W, text: String){
 }
 
 
+fn setup_output(spec: OutputSpec) -> io::Result<Output> {
+    match spec {
+        OutputSpec::Stdout => Ok(Output::Stdout(io::stdout())),
+        OutputSpec::File(path) => {
+            let file = fs::File::create(path)?;
+            Ok(Output::File(file))
+        }
+    }
+}
+
+
+
+#[derive(Debug)]
+#[allow(dead_code)]
+enum ParseArgError {
+    MissingValue(&'static str),
+    InvalidValue(&'static str),
+}
+
+#[derive(Debug)]
+struct Args{
+	help_flag: bool,
+	final_flag: bool,
+	hz: u64,
+	output: OutputSpec,
+	target_pid: i32,
+}
+
+
+fn parse_args(args: &[String]) -> Result<Args, ParseArgError> {
+    let mut help_flag = false;
+    let mut final_flag = false;
+    let mut hz = 1;
+    let mut output = OutputSpec::Stdout;
+    let mut pid = None;
+
+    let mut iter = args.iter().skip(1).peekable(); // skip program name
+
+    while let Some(arg) = iter.next() {
+        match arg.as_str() {
+            "--help" => help_flag = true,
+            "--final" => final_flag = true,
+            "--hertz" => {
+                let value = iter.next().ok_or(ParseArgError::MissingValue("hertz"))?;
+                hz = value.parse().map_err(|_| ParseArgError::InvalidValue("hertz"))?;
+                if hz == 0 {
+                    return Err(ParseArgError::InvalidValue("hertz"));
+                }
+            }
+            "--output-file" => {
+                let value = iter.next().ok_or(ParseArgError::MissingValue("output-file"))?;
+                output = OutputSpec::File(PathBuf::from(value));
+            }
+            other => {
+                // assume PID if numeric
+                pid = Some(other.parse().map_err(|_| ParseArgError::InvalidValue("pid"))?);
+            }
+        }
+    }
+
+    let target_pid = pid.ok_or(ParseArgError::MissingValue("pid"))?;
+
+    Ok(Args {
+        help_flag,
+        final_flag,
+        hz,
+        output,
+        target_pid,
+    })
+}
+
 fn main() {
-    let args: Vec<String> = env::args().collect();
-    if args.len() == 2 && args[1] == "--help"{
+	let raw_args: Vec<String> = env::args().collect();
+    let args: Args = match parse_args(&raw_args) {
+    	Ok(args_struct) => args_struct,
+    	Err(e) => {
+    		eprintln!("Memimpact failed to parsed arguments: {:?}", e);
+    		process::exit(1);
+    	}
+    };
+    if args.help_flag{
     	let version = env!("CARGO_PKG_VERSION");
     	println!(
 			"Memimpact -- measure the memory impact of any PID and its children processes.\n\
@@ -285,35 +369,30 @@ fn main() {
     	);
     	process::exit(0);
     }
-    let print_flag: bool = !args.contains(&"--final".to_string());
-    let mut hz: u64 = 1;
-    if let Some(hz_index) = args.iter().position(|arg| arg == "--hertz") && args.len() > hz_index{
-    	hz = args[hz_index + 1].parse().expect("Invalid strickly positive integer value for hertz option");
-    }
-    if hz == 0{
-    	eprintln!("Invalid strickly positive integer value for hertz option");
-    	process::exit(1);
-    }
-    let sleep_duration: u64 = 1000 / hz;
+    
+	let sleep_duration: u64 = 1000 / args.hz;
 
-    let output_index = args.iter().position(|arg| arg == "--output-file");
-    let mut output = if output_index.is_some_and(|index| args.len() > index) {
-		Output::File(fs::File::create(args[output_index.unwrap() + 1].clone()).expect("Could not open output file"))
-    } else{
-		Output::Stdout(io::stdout())
-    };
-
-    let target_pid: i32 = args[args.len() -1].parse().expect("Invalid integer value for PID");
-
-    let process_name = match get_process_name(target_pid) {
+    let process_name = match get_process_name(args.target_pid) {
 	    Ok(name) => name,
 	    Err(msg) => {
 	        eprintln!("memimpact error: {}", msg);
 	        process::exit(1);
 	    }
 	};
-	if print_flag{
-	    write_output(&mut output, format!("Tracking memory usage of PID {} {}\n", target_pid, process_name));
+
+	let mut output = match setup_output(args.output) {
+        Ok(o) => o,
+        Err(e) => {
+            eprintln!("Memimapct ailed to open output: {}", e);
+            process::exit(1);
+        }
+    };
+	
+	if !args.final_flag{
+	    write_output(
+	    	&mut output,
+	    	format!("Tracking memory usage of PID {} {}\n", args.target_pid, process_name)
+	    );
 	}
 
     let mut max: u64 = 0;
@@ -321,22 +400,34 @@ fn main() {
 
     loop {
         let mapping = get_map_pid_to_ppid();
-        if !mapping.contains_key(&target_pid){
+        if !mapping.contains_key(&(args.target_pid)){
         	break;
         }
-        let target_descendants = find_descendants(&mapping, target_pid);
+        let target_descendants = find_descendants(&mapping, args.target_pid);
         current = target_descendants.iter().map(read_rss_kb).sum();
         
         max = max.max(current);
         let display_current = format_memory(current);
         let display_max = format_memory(max);
-        if print_flag{
-	        write_output(&mut output, format!("PID {} {}: current {}, max {}\n", target_pid, process_name, display_current, display_max ));
+        if !args.final_flag{
+	        write_output(
+	        	&mut output,
+	        	format!(
+	        		"PID {} {}: current {}, max {}\n",
+	        		args.target_pid,
+	        		process_name,
+	        		display_current,
+	        		display_max
+	        	)
+	        );
 	    }
         thread::sleep(Duration::from_millis(sleep_duration));
     }
     let display_max = format_memory(max);
-    write_output(&mut output, format!("PID {} {}: max {}\n", target_pid, process_name, display_max ));
+    write_output(
+    	&mut output,
+    	format!("PID {} {}: max {}\n", args.target_pid, process_name, display_max )
+    );
 }
 
 
@@ -440,5 +531,170 @@ mod tests {
         let mut buffer: Vec<u8> = Vec::new();
         write_output(&mut buffer, "hello".to_string());
         assert_eq!(buffer, b"hello");
+    }
+
+    fn args(input: &[&str]) -> Vec<String> { // to avoid to add .to_string in following argument tests
+        input.iter().map(|s| s.to_string()).collect()
+    }
+
+    #[test]
+    fn minimal_valid_args() {
+        let argv = args(&["memimpact", "1234"]);
+        let parsed = parse_args(&argv).unwrap();
+
+        assert_eq!(parsed.help_flag, false);
+        assert_eq!(parsed.final_flag, false);
+        assert_eq!(parsed.hz, 1);
+        matches!(parsed.output, OutputSpec::Stdout);
+        assert_eq!(parsed.target_pid, 1234);
+    }
+
+    #[test]
+    fn full_valid_args() {
+        let argv = args(&[
+            "memimpact",
+            "--hertz", "10",
+            "--output-file", "out.txt",
+            "--final",
+            "4321",
+        ]);
+
+        let parsed = parse_args(&argv).unwrap();
+
+        assert!(parsed.final_flag);
+        assert!(!parsed.help_flag);
+        assert_eq!(parsed.hz, 10);
+        assert_eq!(parsed.target_pid, 4321);
+
+        match parsed.output {
+            OutputSpec::File(path) => assert_eq!(path, PathBuf::from("out.txt")),
+            _ => panic!("expected file output"),
+        }
+    }
+
+    #[test]
+    fn help_flag_only() {
+        let argv = args(&["memimpact", "--help", "999"]);
+
+        let parsed = parse_args(&argv).unwrap();
+        assert!(parsed.help_flag);
+        assert_eq!(parsed.target_pid, 999);
+    }
+
+    #[test]
+    fn hertz_value_missing_pid() {
+        let argv = args(&["memimpact", "--hertz", "1234"]);
+
+        let err = parse_args(&argv).unwrap_err();
+
+        match err {
+            ParseArgError::MissingValue("pid") => (),
+            _ => panic!("unexpected error: {:?}", err),
+        }
+    }
+
+    #[test]
+    fn missing_hertz_value() {
+        let argv = args(&["memimpact", "1234", "--hertz"]);
+
+        let err = parse_args(&argv).unwrap_err();
+
+        match err {
+            ParseArgError::MissingValue("hertz") => (),
+            _ => panic!("unexpected error: {:?}", err),
+        }
+    }
+
+
+    #[test]
+    fn invalid_hertz_value() {
+        let argv = args(&["memimpact", "--hertz", "abc", "123"]);
+
+        let err = parse_args(&argv).unwrap_err();
+
+        match err {
+            ParseArgError::InvalidValue("hertz") => (),
+            _ => panic!("unexpected error: {:?}", err),
+        }
+    }
+
+    #[test]
+    fn zero_hertz_is_invalid() {
+        let argv = args(&["memimpact", "--hertz", "0", "123"]);
+
+        let err = parse_args(&argv).unwrap_err();
+
+        match err {
+            ParseArgError::InvalidValue("hertz") => (),
+            _ => panic!("unexpected error: {:?}", err),
+        }
+    }
+
+    #[test]
+    fn missing_output_file_value() {
+        let argv = args(&["memimpact", "1234", "--output-file"]);
+
+        let err = parse_args(&argv).unwrap_err();
+
+        match err {
+            ParseArgError::MissingValue("output-file") => (),
+            _ => panic!("unexpected error: {:?}", err),
+        }
+    }
+
+    #[test]
+    fn invalid_pid() {
+        let argv = args(&["memimpact", "not_a_pid"]);
+
+        let err = parse_args(&argv).unwrap_err();
+
+        match err {
+            ParseArgError::InvalidValue("pid") => (),
+            _ => panic!("unexpected error: {:?}", err),
+        }
+    }
+
+    #[test]
+    fn missing_pid() {
+        let argv = args(&["memimpact", "--final"]);
+
+        let err = parse_args(&argv).unwrap_err();
+
+        match err {
+            ParseArgError::MissingValue("pid") => (),
+            _ => panic!("unexpected error: {:?}", err),
+        }
+    }
+
+    #[test]
+    fn realistic_mixed_order() {
+        let argv = args(&[
+            "memimpact",
+            "--final",
+            "5678",
+            "--hertz", "5",
+        ]);
+
+        let parsed = parse_args(&argv).unwrap();
+
+        assert!(parsed.final_flag);
+        assert_eq!(parsed.hz, 5);
+        assert_eq!(parsed.target_pid, 5678);
+    }
+
+    #[test]
+    fn realistic_order() {
+        let argv = args(&[
+            "memimpact",
+            "--final",
+            "--hertz", "5",
+            "5678",
+        ]);
+
+        let parsed = parse_args(&argv).unwrap();
+
+        assert!(parsed.final_flag);
+        assert_eq!(parsed.hz, 5);
+        assert_eq!(parsed.target_pid, 5678);
     }
 }
