@@ -124,7 +124,7 @@ Feel free to open a PR or issue.
 
 MIT License
 
-Copyright (c) 2025, Mifour
+Copyright (c) 2026, Mifour
 
 Permission is hereby granted, free of charge, to any person obtaining a copy
 of this software and associated documentation files (the "Software"), to deal
