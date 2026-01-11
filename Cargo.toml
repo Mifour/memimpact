@@ -2,7 +2,7 @@
 name = "memimpact"
 description = "measure the memory impact of any PID and its children processes on any linux."
 authors = ["mifour"]
-version = "0.0.6"
+version = "0.0.7"
 edition = "2024"
 license = "MIT"
 repository = "https://github.com/Mifour/memimpact"

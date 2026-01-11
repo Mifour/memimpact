@@ -5,6 +5,11 @@ All notable changes to **MemImpact** will be documented in this file.
 This project adheres to [Semantic Versioning](https://semver.org/).
 
 ---
+## [0.0.7] — 2026-01-11
+### Refactor
+- Refactor to have arguments into a simple struct and isolate arg parsing into a function
+- add some tests about argument parsing
+  
 ## [0.0.6] — 2025-12-21
 ### Improvements
 - Refactored the parsing of proc/{}/stat and proc/{}/statm files
