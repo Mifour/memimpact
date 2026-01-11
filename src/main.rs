@@ -1,3 +1,8 @@
+#![warn(clippy::all)]
+// To uncomment later
+//#![warn(clippy::unwrap_used)]
+//#![warn(clippy::expect_used)]
+
 use std::collections::{HashMap, HashSet};
 use std::{env, fs, process};
 use std::io::{self, Write};
@@ -15,11 +20,10 @@ fn list_processes() -> Vec<i32> {
     if let Ok(entries) = fs::read_dir("/proc") {
         for entry in entries.flatten() {              // ignore invalid directory entries
             if let Ok(metadata) = entry.metadata() && metadata.is_dir() {  // ignore metadata errors
-               if let Some(name) = entry.file_name().to_str() {
-                    if let Ok(pid) = name.parse::<i32>() {
+               if let Some(name) = entry.file_name().to_str()
+                    && let Ok(pid) = name.parse::<i32>() {
                         pids.push(pid);
                     }
-                }
             }
         }
     }
