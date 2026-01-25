@@ -125,7 +125,7 @@ fn parse_proc_stat(content: &str) -> Result<ProcStat<'_>, ProcStatError> {
     Ok(ProcStat{pid, comm, state, ppid})
 }
 
-fn get_process_name(pid: i32) -> Result<String, String> {
+fn get_process_name(pid: &i32) -> Result<String, String> {
     let path = format!("/proc/{}/stat", pid);
     let contents = fs::read_to_string(&path)
    	        .map_err(|_| format!("Could not read {}", path))?;
@@ -204,12 +204,12 @@ fn read_rss_kb(pid: &i32) -> u64{
 
 fn find_descendants(
     parent_of: &HashMap<i32, i32>,
-    target_pid: i32,
+    target_pid: &i32,
 ) -> HashSet<i32> {
 	// Given a mapping of pid -> ppid and a target pid,
 	// return all descendants of the target (including the target itself)
     let mut descendants = HashSet::new();
-    descendants.insert(target_pid);
+    descendants.insert(target_pid.clone());
 	let mut found_new: bool;
     loop {
     	found_new = false;
@@ -303,7 +303,7 @@ struct Args{
 	final_flag: bool,
 	hz: u64,
 	output: OutputSpec,
-	target_pid: i32,
+	target_pids: Vec<i32>,
 }
 
 
@@ -338,14 +338,14 @@ fn parse_args(args: &[String]) -> Result<Args, ParseArgError> {
         }
     }
 
-    let target_pid = pid.ok_or(ParseArgError::MissingValue("pid"))?;
-
+    let target_pid = pid.ok_or(ParseArgError::MissingValue("pid"))?; // accept only one pid from raw args
+	let target_pids: Vec<i32> = vec![target_pid];
     Ok(Args {
         help_flag,
         final_flag,
         hz,
         output,
-        target_pid,
+        target_pids,
     })
 }
 
@@ -376,7 +376,7 @@ fn main() {
     
 	let sleep_duration: u64 = 1000 / args.hz;
 
-    let process_name = match get_process_name(args.target_pid) {
+    let process_name = match get_process_name(args.target_pids.first().unwrap()) {
 	    Ok(name) => name,
 	    Err(msg) => {
 	        eprintln!("memimpact error: {}", msg);
@@ -395,7 +395,7 @@ fn main() {
 	if !args.final_flag{
 	    write_output(
 	    	&mut output,
-	    	format!("Tracking memory usage of PID {} {}\n", args.target_pid, process_name)
+	    	format!("Tracking memory usage of PID {} {}\n", args.target_pids.first().unwrap(), process_name)
 	    );
 	}
 
@@ -403,11 +403,18 @@ fn main() {
     let mut current: u64;
 
     loop {
+    	let mut stop_loop = false;
         let mapping = get_map_pid_to_ppid();
-        if !mapping.contains_key(&(args.target_pid)){
+        for pid in &args.target_pids{
+        	 if !mapping.contains_key(pid){
+        	 	stop_loop = true;
+	        	break;
+    	    } 
+        }
+        if stop_loop{
         	break;
         }
-        let target_descendants = find_descendants(&mapping, args.target_pid);
+        let target_descendants = find_descendants(&mapping, args.target_pids.first().unwrap());
         current = target_descendants.iter().map(read_rss_kb).sum();
         
         max = max.max(current);
@@ -418,7 +425,7 @@ fn main() {
 	        	&mut output,
 	        	format!(
 	        		"PID {} {}: current {}, max {}\n",
-	        		args.target_pid,
+	        		args.target_pids.first().unwrap(),
 	        		process_name,
 	        		display_current,
 	        		display_max
@@ -430,7 +437,7 @@ fn main() {
     let display_max = format_memory(max);
     write_output(
     	&mut output,
-    	format!("PID {} {}: max {}\n", args.target_pid, process_name, display_max )
+    	format!("PID {} {}: max {}\n", args.target_pids.first().unwrap(), process_name, display_max )
     );
 }
 
@@ -476,7 +483,7 @@ mod tests {
         map.insert(4, 2);
         map.insert(5, 4);
 
-        let descendants = find_descendants(&map, 1);
+        let descendants = find_descendants(&map, &1);
 
         let expected: HashSet<i32> = [1, 2, 3, 4, 5].into_iter().collect();
         assert_eq!(descendants, expected);
@@ -488,7 +495,7 @@ mod tests {
         map.insert(2, 1);
         map.insert(3, 1);
 
-        let descendants = find_descendants(&map, 2);
+        let descendants = find_descendants(&map, &2);
 
         let expected: HashSet<i32> = [2].into_iter().collect();
         assert_eq!(descendants, expected);
@@ -550,7 +557,7 @@ mod tests {
         assert_eq!(parsed.final_flag, false);
         assert_eq!(parsed.hz, 1);
         matches!(parsed.output, OutputSpec::Stdout);
-        assert_eq!(parsed.target_pid, 1234);
+        assert_eq!(parsed.target_pids, vec![1234]);
     }
 
     #[test]
@@ -568,7 +575,7 @@ mod tests {
         assert!(parsed.final_flag);
         assert!(!parsed.help_flag);
         assert_eq!(parsed.hz, 10);
-        assert_eq!(parsed.target_pid, 4321);
+        assert_eq!(parsed.target_pids, vec![4321]);
 
         match parsed.output {
             OutputSpec::File(path) => assert_eq!(path, PathBuf::from("out.txt")),
@@ -582,7 +589,7 @@ mod tests {
 
         let parsed = parse_args(&argv).unwrap();
         assert!(parsed.help_flag);
-        assert_eq!(parsed.target_pid, 999);
+        assert_eq!(parsed.target_pids, vec![999]);
     }
 
     #[test]
@@ -683,7 +690,7 @@ mod tests {
 
         assert!(parsed.final_flag);
         assert_eq!(parsed.hz, 5);
-        assert_eq!(parsed.target_pid, 5678);
+        assert_eq!(parsed.target_pids, vec![5678]);
     }
 
     #[test]
@@ -699,6 +706,6 @@ mod tests {
 
         assert!(parsed.final_flag);
         assert_eq!(parsed.hz, 5);
-        assert_eq!(parsed.target_pid, 5678);
+        assert_eq!(parsed.target_pids, vec![5678]);
     }
 }
