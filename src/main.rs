@@ -91,7 +91,7 @@ fn parse_proc_stat(content: &str) -> Result<ProcStat<'_>, ProcStatError> {
 
     let open = content.find('(').ok_or(ProcStatError::InvalidFormat)?;
     let close = content[open + 1..]
-        .find(')')
+        .rfind(')')
         .map(|i| open + 1 + i)
         .ok_or(ProcStatError::InvalidFormat)?;
 
@@ -132,8 +132,8 @@ fn get_process_name(pid: &i32) -> Result<String, String> {
     let proc_stat = parse_proc_stat(&contents).map_err(|e| {
         format!(
             "Unsupported /proc/{}/stat format ({:?}). \
-             Your system is currently not supported. \
-             Please open an issue with your kernel version.",
+             Either the process name is or your system is currently not supported. \
+             Please open an issue with the complete /proc/pid/stat content and your kernel version.",
             pid, e
         )
     })?;
@@ -204,13 +204,15 @@ fn read_rss_kb(pid: &i32) -> u64{
 
 fn find_descendants(
     parent_of: &HashMap<i32, i32>,
-    target_pid: &i32,
+    target_pids: &Vec<i32>,
 ) -> HashSet<i32> {
 	// Given a mapping of pid -> ppid and a target pid,
-	// return all descendants of the target (including the target itself)
+	// return all descendants of the targets (including the targets themself)
     let mut descendants = HashSet::new();
-    descendants.insert(target_pid.clone());
-	let mut found_new: bool;
+    for pid in target_pids{
+    	descendants.insert(*pid);
+    }
+    let mut found_new: bool;
     loop {
     	found_new = false;
         for (&pid, &ppid) in parent_of.iter() {
@@ -289,6 +291,19 @@ fn setup_output(spec: OutputSpec) -> io::Result<Output> {
 }
 
 
+fn get_pids_from_name(name: String) -> Vec<i32>{
+	let mut result_pids: Vec<i32> = Vec::new();
+	let all_pids = list_processes();
+	for pid in all_pids{
+		let x = get_process_name(&pid).unwrap();
+		if x == name{
+			result_pids.push(pid);
+		}  
+	}
+	result_pids
+}
+
+
 
 #[derive(Debug)]
 #[allow(dead_code)]
@@ -313,12 +328,23 @@ fn parse_args(args: &[String]) -> Result<Args, ParseArgError> {
     let mut hz = 1;
     let mut output = OutputSpec::Stdout;
     let mut pid = None;
+    let mut name = None;
+    let mut target_pids: Vec<i32> = Vec::new();
 
     let mut iter = args.iter().skip(1).peekable(); // skip program name
 
     while let Some(arg) = iter.next() {
         match arg.as_str() {
-            "--help" => help_flag = true,
+            "--help" => {
+            	help_flag = true;
+            	return Ok(Args {
+            	        help_flag,
+            	        final_flag,
+            	        hz,
+            	        output,
+            	        target_pids,
+            	    });
+            }
             "--final" => final_flag = true,
             "--hertz" => {
                 let value = iter.next().ok_or(ParseArgError::MissingValue("hertz"))?;
@@ -331,15 +357,23 @@ fn parse_args(args: &[String]) -> Result<Args, ParseArgError> {
                 let value = iter.next().ok_or(ParseArgError::MissingValue("output-file"))?;
                 output = OutputSpec::File(PathBuf::from(value));
             }
+            "--name" => {
+            	let value = iter.next().ok_or(ParseArgError::MissingValue("name"))?;
+            	name = Some("(".to_string() + value + ")");
+            }
             other => {
                 // assume PID if numeric
                 pid = Some(other.parse().map_err(|_| ParseArgError::InvalidValue("pid"))?);
             }
         }
     }
+    if let Some(name_val) = name {
+        target_pids.append(&mut get_pids_from_name(name_val));
+    } else {
+        let target_pid = pid.ok_or(ParseArgError::MissingValue("pid"))?; // accept only one pid from raw args
+        target_pids.push(target_pid);
+    }
 
-    let target_pid = pid.ok_or(ParseArgError::MissingValue("pid"))?; // accept only one pid from raw args
-	let target_pids: Vec<i32> = vec![target_pid];
     Ok(Args {
         help_flag,
         final_flag,
@@ -367,6 +401,7 @@ fn main() {
 			Options:\n\
 			--hertz int, the desired number of iterations per second\n\
 			--output-file str, the file path where to write the output (stdout if absent)\n\
+			--name str, sum up the memory usage of all processes with this name (disable the <pid> argument)\n\
 			Flags:\n\
 			--final, display only 1 line with the max value",
     		version
@@ -414,7 +449,7 @@ fn main() {
         if stop_loop{
         	break;
         }
-        let target_descendants = find_descendants(&mapping, args.target_pids.first().unwrap());
+        let target_descendants = find_descendants(&mapping, &args.target_pids);
         current = target_descendants.iter().map(read_rss_kb).sum();
         
         max = max.max(current);
@@ -466,6 +501,16 @@ mod tests {
         assert_eq!(actual, expected);
     }
 
+    #[test]
+    fn test_parse_proc_stat_with_paranthesis_in_name() {
+    	// real world test case
+        let input = "3674 ((sd-pam)) S 3672 3672 3672 0 -1 4194624 49 0 0 0 0 0 0 0 20 0 1 0 4058 17170432 450 18446744073709551615 1 1 0 0 0 0 0 4096 0 0 0 0 17 8 0 0 0 0 0 0 0 0 0 0 0 0 0";
+        let actual = parse_proc_stat(input).unwrap();
+
+        let expected = ProcStat{pid: 3674, comm: "((sd-pam))", state: ProcessState::S, ppid: 3672};
+        assert_eq!(actual, expected);
+    }
+
 
     #[test]
     fn test_parse_proc_stat_invalid_missing_parens() {
@@ -483,7 +528,7 @@ mod tests {
         map.insert(4, 2);
         map.insert(5, 4);
 
-        let descendants = find_descendants(&map, &1);
+        let descendants = find_descendants(&map, &vec![1]);
 
         let expected: HashSet<i32> = [1, 2, 3, 4, 5].into_iter().collect();
         assert_eq!(descendants, expected);
@@ -495,7 +540,7 @@ mod tests {
         map.insert(2, 1);
         map.insert(3, 1);
 
-        let descendants = find_descendants(&map, &2);
+        let descendants = find_descendants(&map, &vec![2]);
 
         let expected: HashSet<i32> = [2].into_iter().collect();
         assert_eq!(descendants, expected);
@@ -585,11 +630,10 @@ mod tests {
 
     #[test]
     fn help_flag_only() {
-        let argv = args(&["memimpact", "--help", "999"]);
+        let argv = args(&["memimpact", "--help"]);
 
         let parsed = parse_args(&argv).unwrap();
         assert!(parsed.help_flag);
-        assert_eq!(parsed.target_pids, vec![999]);
     }
 
     #[test]

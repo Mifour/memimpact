@@ -50,7 +50,7 @@ sudo mv memimpact /usr/local/bin/
 If you'd like a `time`-like interface, add this to your `.bashrc` or `.zshrc`:
 
 ```sh
-memimpact() {
+memory() {
   "$@" &
   pid=$!
   /path/to/memimpact --final $pid # &
@@ -66,17 +66,21 @@ memimpact() {
 ```sh
 ➜ ./memimpact --help            
 Memimpact -- measure the memory impact of any PID and its children processes.
-Version: 0.0.1
+Version: 0.0.8
 Usage: memimpact <options> <pid>
 Options:
 --hertz int, the desired number of iterations per second
+--output-file str, the file path where to write the output (stdout if absent)
+--name str, sum up the memory usage of all processes with this name (disable the <pid> argument)
 Flags:
 --final, display only 1 line with the max value
 ```
 
 ### Basic usage
 
-### Using the optional shell wrapper
+#### call the binary directly
+  
+Providing a pid
 
 ```sh
 ./memimpact 115404
@@ -85,11 +89,20 @@ PID 115404 (spotify): current 411MB, max 411MB
 PID 115404 (spotify): current 406MB, max 411MB
 ...
 ```
-
+  
+Providing a name
+```sh
+./memimpact --name firefox
+Tracking memory usage of PID 5666 (firefox)
+PID 5666 (firefox): current 2GB, max 2GB
+PID 5666 (firefox): current 2GB, max 2GB
+...
+```
+#### Using the optional shell wrapper
 Example:
 
 ```sh
-memimpact rg -c -o '[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,3}' data.csv
+memory rg -c -o '[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,3}' data.csv
 ```
 
 Output example:
