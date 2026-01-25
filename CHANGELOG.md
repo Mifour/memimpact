@@ -5,6 +5,13 @@ All notable changes to **MemImpact** will be documented in this file.
 This project adheres to [Semantic Versioning](https://semver.org/).
 
 ---
+## [0.0.8] - 2026-01-25
+## Feature
+- Add a --name option that make memimpact target all processes with a matching name
+
+## Fixed
+- Parsing error when process had a process name with parenthesis
+
 ## [0.0.7] — 2026-01-11
 ### Refactor
 - Refactor to have arguments into a simple struct and isolate arg parsing into a function
