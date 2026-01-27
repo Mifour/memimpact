@@ -1,6 +1,6 @@
 # MemImpact
 
-**MemImpact** is a lightweight, Rust-powered CLI tool that measures the **maximum memory usage** of any terminal command — including all of its child processes.  
+**MemImpact** is a lightweight, CLI tool written in Rust that measures the **maximum memory usage** of any terminal command — including all of its child processes.  
 It works similarly to the classic Unix `time` command, but focuses specifically on memory.
 
 Perfect for easy benchmarking, profiling, or simply understanding how much RAM your commands actually consume.
@@ -16,6 +16,12 @@ Perfect for easy benchmarking, profiling, or simply understanding how much RAM y
 -  Works as a direct command or with an optional shell wrapper  
 -  Easy to install
 -  Easy to use, just add `memimpact` in front of your command
+
+---
+## Limitations
+
+- There is no support for MacOS and Windows. And it is not planned because their memory management is different.
+- Very short-lived processes can cause issues. Memimpact has been tested to run successfuly down to 1/10_000th second.
 
 ---
 
@@ -129,6 +135,7 @@ No kernel modules, no ptrace, no dependencies — just reading `/proc`.
 ## Contributing
 
 Contributions, issues, and feature requests are welcome!
+There is a CONTRIBUTING note aiming to help.  
 Feel free to open a PR or issue.
 
 ---
