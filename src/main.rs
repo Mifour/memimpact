@@ -7,9 +7,11 @@ use std::collections::{HashMap, HashSet};
 use std::{env, fs, process};
 use std::io::{self, Write};
 use std::path::PathBuf;
-use std::time::Duration;
+use std::time::{Duration, SystemTime};
 use std::thread;
 
+mod template;
+pub use crate::template::template_engine;
 
 // TODO: get the page size dynamically
 const PAGE_SIZE_KB: u64 = 4; // 4096 bytes = 4 KB
@@ -230,17 +232,6 @@ fn find_descendants(
 }
 
 
-fn format_memory(value: u64) -> String{
-	// every possible u64 values are handled, it is impossible to be stuck in an infinite loop
-	const UNITS: [&str; 7] = ["KB", "MB", "GB", "TB", "PB", "EB", "ZB"];
-    let mut current = value;
-    let mut unit_index = 0;
-    while current >= 1024 && unit_index < UNITS.len() - 1 {
-        current >>= 10;
-        unit_index += 1;
-    }
-    format!("{}{}", current, UNITS[unit_index])
-}
 
 
 #[derive(Debug)]
@@ -272,7 +263,7 @@ impl Write for Output {
 }
 
 
-fn write_output<W: Write>(mut out: W, text: String){
+fn write_output<W: Write>(out: &mut W, text: &str){
     match out.write_all(text.as_bytes()){
 		Ok(_) => (),
 		Err(e) => {eprintln!("Could not write output because {}", e);}
@@ -319,6 +310,7 @@ struct Args{
 	hz: u64,
 	output: OutputSpec,
 	target_pids: Vec<i32>,
+	template_string: String,
 }
 
 
@@ -330,6 +322,7 @@ fn parse_args(args: &[String]) -> Result<Args, ParseArgError> {
     let mut pid = None;
     let mut name = None;
     let mut target_pids: Vec<i32> = Vec::new();
+    let mut template_string: String = "PID {Pid} {ProcessName}: current {CurrentHuman}, max {MaxHuman}\n".to_string();
 
     let mut iter = args.iter().skip(1).peekable(); // skip program name
 
@@ -343,6 +336,7 @@ fn parse_args(args: &[String]) -> Result<Args, ParseArgError> {
             	        hz,
             	        output,
             	        target_pids,
+            	        template_string,
             	    });
             }
             "--final" => final_flag = true,
@@ -361,6 +355,9 @@ fn parse_args(args: &[String]) -> Result<Args, ParseArgError> {
             	let value = iter.next().ok_or(ParseArgError::MissingValue("name"))?;
             	name = Some("(".to_string() + value + ")");
             }
+            "--template" => {
+             	template_string = iter.next().ok_or(ParseArgError::MissingValue("template"))?.clone();
+             }
             other => {
                 // assume PID if numeric
                 pid = Some(other.parse().map_err(|_| ParseArgError::InvalidValue("pid"))?);
@@ -380,7 +377,13 @@ fn parse_args(args: &[String]) -> Result<Args, ParseArgError> {
         hz,
         output,
         target_pids,
+        template_string,
     })
+}
+
+
+fn now() -> u64{
+	SystemTime::now().duration_since(SystemTime::UNIX_EPOCH).unwrap().as_secs()
 }
 
 fn main() {
@@ -402,9 +405,18 @@ fn main() {
 			--hertz int, the desired number of iterations per second\n\
 			--output-file str, the file path where to write the output (stdout if absent)\n\
 			--name str, sum up the memory usage of all processes with this name (disable the <pid> argument)\n\
+			--template str, the template used in output. Fields must be identifed with {{}}. Available fields are:\n\
+			\tPid: the process's pid,\n\
+			\tProcessName: the process's name,\n\
+			\tCurrentBytes: the current memory used by the process expressed in bytes,\n\
+			\tMaxBytes:  the maximum memory used by the process expressed in bytes,\n\
+			\tCurrentHuman: the current memory used by the process formatted in human readable IEC notation,\n\
+			\tMaxHuman:  the maximum memory used by the process formatted in human readable IEC notation,\n\
+			\tTimestamp: the unix timestamp representing seconds from EPOCH,\n\
+			\texample of template string: '[\"pid\": {{Pid}}, \"process\": {{ProcessName}}, \"timestamp\": {{Timestamp}}, \"memory\": {{CurrentBytes}}]\\n'\n\
 			Flags:\n\
 			--final, display only 1 line with the max value",
-    		version
+    		version,
     	);
     	process::exit(0);
     }
@@ -426,16 +438,19 @@ fn main() {
             process::exit(1);
         }
     };
-	
-	if !args.final_flag{
-	    write_output(
-	    	&mut output,
-	    	format!("Tracking memory usage of PID {} {}\n", args.target_pids.first().unwrap(), process_name)
-	    );
-	}
 
-    let mut max: u64 = 0;
-    let mut current: u64;
+	let mut output_buffer = String::new();
+	
+	let escaped = template_engine::unescape(args.template_string.as_str()).unwrap();
+	let template = template_engine::Template::parse(escaped.as_str()).unwrap();
+
+	let mut sample = template_engine::MemorySample{
+		pid: *args.target_pids.first().unwrap(),
+		process_name: process_name.as_str(),
+		current_bytes: 0,
+		max_bytes: 0,
+		timestamp: now(),
+	};
 
     loop {
     	let mut stop_loop = false;
@@ -450,30 +465,24 @@ fn main() {
         	break;
         }
         let target_descendants = find_descendants(&mapping, &args.target_pids);
-        current = target_descendants.iter().map(read_rss_kb).sum();
-        
-        max = max.max(current);
-        let display_current = format_memory(current);
-        let display_max = format_memory(max);
-        if !args.final_flag{
-	        write_output(
-	        	&mut output,
-	        	format!(
-	        		"PID {} {}: current {}, max {}\n",
-	        		args.target_pids.first().unwrap(),
-	        		process_name,
-	        		display_current,
-	        		display_max
-	        	)
-	        );
-	    }
+        sample.current_bytes = target_descendants.iter().map(read_rss_kb).sum();
+        sample.max_bytes = sample.max_bytes.max(sample.current_bytes);
+        sample.timestamp = now();
+		if !args.final_flag{
+			match template.render(&sample, &mut output_buffer){
+				Ok(()) => write_output(&mut output, &output_buffer),
+				Err(e) => eprintln!("error while writing ouput: {:?}", e) 
+			};
+			output_buffer.clear();
+		}
+		
         thread::sleep(Duration::from_millis(sleep_duration));
     }
-    let display_max = format_memory(max);
-    write_output(
-    	&mut output,
-    	format!("PID {} {}: max {}\n", args.target_pids.first().unwrap(), process_name, display_max )
-    );
+    sample.max_bytes = sample.max_bytes.max(sample.current_bytes);
+	match template.render(&sample, &mut output_buffer){
+		Ok(()) => write_output(&mut output, &output_buffer),
+		Err(e) => eprintln!("error while writing ouput: {:?}", e) 
+	};
 }
 
 
@@ -482,6 +491,7 @@ fn main() {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::template_engine::format_memory;
 
     #[test]
     fn test_parse_proc_stat_basic() {
@@ -585,7 +595,7 @@ mod tests {
     #[test]
     fn test_write_output_to_buffer() {
         let mut buffer: Vec<u8> = Vec::new();
-        write_output(&mut buffer, "hello".to_string());
+        write_output(&mut buffer, "hello");
         assert_eq!(buffer, b"hello");
     }
 

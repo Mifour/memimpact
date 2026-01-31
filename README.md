@@ -16,6 +16,7 @@ Perfect for easy benchmarking, profiling, or simply understanding how much RAM y
 -  Works as a direct command or with an optional shell wrapper  
 -  Easy to install
 -  Easy to use, just add `memimpact` in front of your command
+-  Templating for custom output formats
 
 ---
 ## Limitations
@@ -72,12 +73,21 @@ memory() {
 ```sh
 ➜ ./memimpact --help            
 Memimpact -- measure the memory impact of any PID and its children processes.
-Version: 0.0.8
+Version: 0.0.9
 Usage: memimpact <options> <pid>
 Options:
 --hertz int, the desired number of iterations per second
 --output-file str, the file path where to write the output (stdout if absent)
 --name str, sum up the memory usage of all processes with this name (disable the <pid> argument)
+--template str, the template used in output. Fields must be identifed with {}. Available fields are:
+	Pid: the process's pid,
+	ProcessName: the process's name,
+	CurrentBytes: the current memory used by the process expressed in bytes,
+	MaxBytes:  the maximum memory used by the process expressed in bytes,
+	CurrentHuman: the current memory used by the process formatted in human readable IEC notation,
+	MaxHuman:  the maximum memory used by the process formatted in human readable IEC notation,
+	Timestamp: the unix timestamp representing seconds from EPOCH,
+	example of template string: '["pid": {Pid}, "process": {ProcessName}, "timestamp": {Timestamp}, "memory": {CurrentBytes}]\n'
 Flags:
 --final, display only 1 line with the max value
 ```
@@ -99,7 +109,6 @@ PID 115404 (spotify): current 406MB, max 411MB
 Providing a name
 ```sh
 ./memimpact --name firefox
-Tracking memory usage of PID 5666 (firefox)
 PID 5666 (firefox): current 2GB, max 2GB
 PID 5666 (firefox): current 2GB, max 2GB
 ...
@@ -117,7 +126,15 @@ Output example:
 [2] 183480
 39799522
 [2]  + 183480 done       "$@"
-PID 183480 (rg): max 3GB
+PID 183480 (rg): current 3GB, max 3GB
+```
+
+Using the templating option
+```sh
+./target/debug/memimpact --name firefox --template '["pid": {Pid}, "process": {ProcessName}, "timestamp": {Timestamp}, "memory": {CurrentBytes}]\n'
+["pid": 5666, "process": (firefox), "timestamp": 1769862415, "memory": 2917524]
+["pid": 5666, "process": (firefox), "timestamp": 1769862416, "memory": 2917524]
+["pid": 5666, "process": (firefox), "timestamp": 1769862417, "memory": 2917524]
 ```
 
 ---
