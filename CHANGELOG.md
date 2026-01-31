@@ -5,6 +5,10 @@ All notable changes to **MemImpact** will be documented in this file.
 This project adheres to [Semantic Versioning](https://semver.org/).
 
 ---
+## [0.0.9] - 2026-01-31
+## Feature
+- Add a --template option that allow to pass a tempalte string to format output by the user
+
 ## [0.0.8] - 2026-01-25
 ## Feature
 - Add a --name option that make memimpact target all processes with a matching name
