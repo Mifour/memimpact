@@ -1,9 +1,30 @@
 # MemImpact
 
-**MemImpact** is a lightweight, CLI tool written in Rust that measures the **maximum memory usage** of any terminal command — including all of its child processes.  
-It works similarly to the classic Unix `time` command, but focuses specifically on memory.
+**MemImpact** is a lightweight Linux CLI utility written in Rust that samples and reports the peak RSS memory usage of a process tree over time.  
 
-Perfect for easy benchmarking, profiling, or simply understanding how much RAM your commands actually consume.
+It observes memory from the outside using the Linux `/proc` filesystem — similar in spirit to `top` or `ps` — and is designed for quick, low-friction memory measurements, not deep profiling.  
+
+MemImpact answers:
+
+> “Roughly how much RAM did this program (and its children) consume at peak?”
+
+without requiring instrumentation, recompilation, or heavyweight tooling.  
+
+### What MemImpact is
+- A process memory monitor
+- A peak RSS estimator
+- A tool for quick benchmarking and sanity checks
+- Useful in scripts, CI, experiments, and comparisons
+- A Linux tool
+  
+### What MemImpact is NOT
+- Not a memory profiler
+- Not allocation tracing
+- Not page-fault analysis
+- Not precise down-to-the-microsecond peak capture
+- Not desinged for MacOS or Windows
+  
+It samples memory at intervals, so extremely short spikes between samples may be missed.  
 
 ---
 
@@ -15,14 +36,8 @@ Perfect for easy benchmarking, profiling, or simply understanding how much RAM y
 -  Fast, zero external dependencies, written in pure Rust std  
 -  Works as a direct command or with an optional shell wrapper  
 -  Easy to install
--  Easy to use, just add `memimpact` in front of your command
+-  Easy to use  
 -  Templating for custom output formats
-
----
-## Limitations
-
-- There is no support for MacOS and Windows. And it is not planned because their memory management is different.
-- Very short-lived processes can cause issues. Memimpact has been tested to run successfuly down to 1/10_000th second.
 
 ---
 
@@ -52,90 +67,80 @@ sudo mv memimpact /usr/local/bin/
 
 ---
 
-### **Optional: Add a `memimpact` shell wrapper**
+## Usage Model
 
-If you'd like a `time`-like interface, add this to your `.bashrc` or `.zshrc`:
+MemImpact operates in two complementary modes.
 
-```sh
+### Observer Mode (Shipped Binary)
+
+The binary monitors an existing process ID.
+
+```bash
+memimpact <pid>
+memimpact --name firefox
+```
+
+This mode is useful when:
+- The process is already running  
+- You want to attach to services  
+- You are debugging long-lived processes  
+
+### Command Mode (Shell Integration)
+
+To measure a command from start to finish (like `time`), MemImpact is typically used with a small shell function you can add to your bashrc/zshrc:
+```bash
 memory() {
   "$@" &
   pid=$!
-  /path/to/memimpact --final $pid # &
+  memimpact --final $pid
   wait $pid
 }
 ```
 
----
+then
 
-## Usage
-
-### help
-```sh
-➜ ./memimpact --help            
-Memimpact -- measure the memory impact of any PID and its children processes.
-Version: 0.0.9
-Usage: memimpact <options> <pid>
-Options:
---hertz int, the desired number of iterations per second
---output-file str, the file path where to write the output (stdout if absent)
---name str, sum up the memory usage of all processes with this name (disable the <pid> argument)
---template str, the template used in output. Fields must be identifed with {}. Available fields are:
-	Pid: the process's pid,
-	ProcessName: the process's name,
-	CurrentBytes: the current memory used by the process expressed in bytes,
-	MaxBytes:  the maximum memory used by the process expressed in bytes,
-	CurrentHuman: the current memory used by the process formatted in human readable IEC notation,
-	MaxHuman:  the maximum memory used by the process formatted in human readable IEC notation,
-	Timestamp: the unix timestamp representing seconds from EPOCH,
-	example of template string: '["pid": {Pid}, "process": {ProcessName}, "timestamp": {Timestamp}, "memory": {CurrentBytes}]\n'
-Flags:
---final, display only 1 line with the max value
 ```
-
-### Basic usage
-
-#### call the binary directly
-  
-Providing a pid
-
-```sh
-./memimpact 115404
-Tracking memory usage of PID 115404 (spotify)
-PID 115404 (spotify): current 411MB, max 411MB
-PID 115404 (spotify): current 406MB, max 411MB
-...
-```
-  
-Providing a name
-```sh
-./memimpact --name firefox
-PID 5666 (firefox): current 2GB, max 2GB
-PID 5666 (firefox): current 2GB, max 2GB
-...
-```
-#### Using the optional shell wrapper
-Example:
-
-```sh
+memory cargo build
+memory python script.py
 memory rg -c -o '[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,3}' data.csv
 ```
 
-Output example:
+#### Why a shell function?
 
-```
-[2] 183480
-39799522
-[2]  + 183480 done       "$@"
-PID 183480 (rg): current 3GB, max 3GB
-```
+MemImpact does not attempt to replace the shell’s job control, environment handling, or expansion logic.
+Instead, it integrates with the shell to observe the process it launches.
 
-Using the templating option
-```sh
-./target/debug/memimpact --name firefox --template '["pid": {Pid}, "process": {ProcessName}, "timestamp": {Timestamp}, "memory": {CurrentBytes}]\n'
-["pid": 5666, "process": (firefox), "timestamp": 1769862415, "memory": 2917524]
-["pid": 5666, "process": (firefox), "timestamp": 1769862416, "memory": 2917524]
-["pid": 5666, "process": (firefox), "timestamp": 1769862417, "memory": 2917524]
-```
+This keeps MemImpact:
+- simpler  
+- shell-agnostic  
+- free from command-parsing complexity  
+
+
+---
+
+## Accuracy & Sampling Model
+
+MemImpact works by periodically reading memory statistics from: `/proc/<pid>/status` → VmRSS.  
+This means:
+- Memory is sampled, not continuously traced  
+- Very short-lived spikes between samples may not be captured  
+- Accuracy depends on the sampling rate (--hertz)  
+- RSS reflects resident memory, not total system memory cost (e.g., swap, page cache attribution)  
+
+MemImpact prioritizes low overhead and simplicity over profiler-level precision.  
+
+For deep memory analysis, use tools like `/usr/bin/time -v` or `perf`.
+
+### How MemImpact compares to other tools?
+
+| Tool               | Purpose                                   | How MemImpact differs                                           |
+| ------------------ | ----------------------------------------- | --------------------------------------------------------------- |
+| `/usr/bin/time -v` | Reports resource usage after process exit | MemImpact can sample continuously and observe running processes |
+| `psrecord`         | Python-based monitoring                   | MemImpact is a single static Rust binary with no runtime deps   |
+| `valgrind massif`  | Heap profiling                            | Much deeper but slower and intrusive                            |
+| `perf`             | System performance analysis               | Broader and more complex                                        |
+
+
 
 ---
 
@@ -149,36 +154,23 @@ Using the templating option
 No kernel modules, no ptrace, no dependencies — just reading `/proc`.
 
 ---
+
+## Known Limitations
+
+MemImpact reports sum of per-process RSS, which can exceed real physical RAM usage due to shared pages.
+Values represent process footprint, not system-wide memory pressure.  
+
+Resources utilization between samples can be missed.  
+
+PID reuse after process exit can lead to incorrect attribution if the pid number recycling happens faster than one cycle duration.  
+
+Behavior inside containers depends on PID namespace and cgroup configuration.  
+
+---
 ## Contributing
 
 Contributions, issues, and feature requests are welcome!
 There is a CONTRIBUTING note aiming to help.  
-Feel free to open a PR or issue.
-
----
-
-## License
-
-MIT License
-
-Copyright (c) 2026, Mifour
-
-Permission is hereby granted, free of charge, to any person obtaining a copy
-of this software and associated documentation files (the "Software"), to deal
-in the Software without restriction, including without limitation the rights
-to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
-copies of the Software, and to permit persons to whom the Software is
-furnished to do so, subject to the following conditions:
-
-The above copyright notice and this permission notice shall be included in all
-copies or substantial portions of the Software.
-
-THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
-IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
-FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
-AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
-LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
-OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
-SOFTWARE.
+Feel free to open a PR or an issue.
 
 ---

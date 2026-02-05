@@ -13,8 +13,6 @@ use std::thread;
 mod template;
 pub use crate::template::template_engine;
 
-// TODO: get the page size dynamically
-const PAGE_SIZE_KB: u64 = 4; // 4096 bytes = 4 KB
 
 fn list_processes() -> Vec<i32> {
     let mut pids = Vec::new();
@@ -184,11 +182,11 @@ fn parse_statm(content: String) -> Result<u64, ProcStatmError> {
         Err(_) => return Err(ProcStatmError::InvalidFormat),
     };
 
-    Ok(rss_pages * PAGE_SIZE_KB)
+    Ok(rss_pages)
 }
 
 
-fn read_rss_kb(pid: &i32) -> u64{
+fn read_rss_kb(pid: &i32, page_size_kib: &u64) -> u64{
     // see https://man7.org/linux/man-pages/man5/proc_pid_statm.5.html
     let path = format!("/proc/{}/statm", pid);
     /*
@@ -200,7 +198,7 @@ fn read_rss_kb(pid: &i32) -> u64{
         Ok(c) => c,
         Err(_) => return 0,
     };
-    parse_statm(contents).unwrap_or(0)
+    parse_statm(contents).unwrap_or(0) * page_size_kib
 }	
 
 
@@ -286,10 +284,10 @@ fn get_pids_from_name(name: String) -> Vec<i32>{
 	let mut result_pids: Vec<i32> = Vec::new();
 	let all_pids = list_processes();
 	for pid in all_pids{
-		let x = get_process_name(&pid).unwrap();
-		if x == name{
-			result_pids.push(pid);
-		}  
+		if let Ok(x) = get_process_name(&pid)
+			&& x == name{
+				result_pids.push(pid);
+			}  
 	}
 	result_pids
 }
@@ -306,8 +304,10 @@ enum ParseArgError {
 #[derive(Debug)]
 struct Args{
 	help_flag: bool,
+	version_flag: bool,
 	final_flag: bool,
 	hz: u64,
+	page_size_kib: u64,
 	output: OutputSpec,
 	target_pids: Vec<i32>,
 	template_string: String,
@@ -316,8 +316,10 @@ struct Args{
 
 fn parse_args(args: &[String]) -> Result<Args, ParseArgError> {
     let mut help_flag = false;
+	let mut version_flag = false;
     let mut final_flag = false;
     let mut hz = 1;
+    let mut page_size_kib = 4;  // 4096 bytes = 4 KB, True for most Linux, but the user probably knows its system better
     let mut output = OutputSpec::Stdout;
     let mut pid = None;
     let mut name = None;
@@ -328,17 +330,32 @@ fn parse_args(args: &[String]) -> Result<Args, ParseArgError> {
 
     while let Some(arg) = iter.next() {
         match arg.as_str() {
-            "--help" => {
+            "--help" | "-h" => {
             	help_flag = true;
             	return Ok(Args {
             	        help_flag,
+            	        version_flag,
             	        final_flag,
             	        hz,
+            	        page_size_kib,
             	        output,
             	        target_pids,
             	        template_string,
             	    });
             }
+            "--version" | "-v" => {
+             	version_flag = true;
+             	return Ok(Args {
+             	        help_flag,
+             	        version_flag,
+             	        final_flag,
+             	        hz,
+             	        page_size_kib,
+             	        output,
+             	        target_pids,
+             	        template_string,
+             	    });
+             }
             "--final" => final_flag = true,
             "--hertz" => {
                 let value = iter.next().ok_or(ParseArgError::MissingValue("hertz"))?;
@@ -356,8 +373,12 @@ fn parse_args(args: &[String]) -> Result<Args, ParseArgError> {
             	name = Some("(".to_string() + value + ")");
             }
             "--template" => {
-             	template_string = iter.next().ok_or(ParseArgError::MissingValue("template"))?.clone();
-             }
+            	template_string = iter.next().ok_or(ParseArgError::MissingValue("template"))?.clone();
+            }
+            "--page-size-kib" => {
+                let value = iter.next().ok_or(ParseArgError::MissingValue("page-size-kib"))?;
+                page_size_kib = value.parse().map_err(|_| ParseArgError::InvalidValue("page-size-kib"))?;
+            }
             other => {
                 // assume PID if numeric
                 pid = Some(other.parse().map_err(|_| ParseArgError::InvalidValue("pid"))?);
@@ -373,8 +394,10 @@ fn parse_args(args: &[String]) -> Result<Args, ParseArgError> {
 
     Ok(Args {
         help_flag,
+        version_flag,
         final_flag,
         hz,
+        page_size_kib,
         output,
         target_pids,
         template_string,
@@ -397,27 +420,70 @@ fn main() {
     };
     if args.help_flag{
     	let version = env!("CARGO_PKG_VERSION");
-    	println!(
-			"Memimpact -- measure the memory impact of any PID and its children processes.\n\
-			Version: {}\n\
-			Usage: memimpact <options> <pid>\n\
-			Options:\n\
-			--hertz int, the desired number of iterations per second\n\
-			--output-file str, the file path where to write the output (stdout if absent)\n\
-			--name str, sum up the memory usage of all processes with this name (disable the <pid> argument)\n\
-			--template str, the template used in output. Fields must be identifed with {{}}. Available fields are:\n\
-			\tPid: the process's pid,\n\
-			\tProcessName: the process's name,\n\
-			\tCurrentBytes: the current memory used by the process expressed in bytes,\n\
-			\tMaxBytes:  the maximum memory used by the process expressed in bytes,\n\
-			\tCurrentHuman: the current memory used by the process formatted in human readable IEC notation,\n\
-			\tMaxHuman:  the maximum memory used by the process formatted in human readable IEC notation,\n\
-			\tTimestamp: the unix timestamp representing seconds from EPOCH,\n\
-			\texample of template string: '[\"pid\": {{Pid}}, \"process\": {{ProcessName}}, \"timestamp\": {{Timestamp}}, \"memory\": {{CurrentBytes}}]\\n'\n\
-			Flags:\n\
-			--final, display only 1 line with the max value",
-    		version,
-    	);
+		println!(
+"MemImpact — sample and report peak RSS memory usage of a Linux process tree
+
+MemImpact monitors memory from the outside via /proc. It estimates peak
+resident memory (RSS) usage over time for a process and all its children.
+It is designed for quick measurement, not deep profiling.
+
+USAGE:
+    memimpact <pid>                  Monitor a running process
+    memimpact --name <process_name>  Monitor processes matching a name
+
+COMMON USE:
+    To measure a command like `time`, use a shell wrapper that launches the
+    program and passes its PID to memimpact (see README).
+
+OPTIONS:
+    --help -h            Print this message and leave.
+
+    --hertz <n>          Sampling rate in measurements per second.
+                         Higher values increase accuracy but add overhead.
+
+    --page-size-kib <n>  Page size of your system in KiB.
+    					 4 by default, for most Linux.
+
+
+    --final              Print only one line with the maximum observed memory
+                         instead of continuous sampling output.
+
+    --output-file <path> Write output to a file instead of stdout.
+
+    --template <string>  Custom output format. Fields use {{}} placeholders.
+
+    --version -v         Print the Memimpact version and leave.
+
+NAME MODE:
+    --name monitors all processes whose command name matches the provided
+    string. Use with care: unrelated processes with the same name will be
+    aggregated.
+
+TEMPLATE FIELDS:
+    {{Pid}}            Process ID
+    {{ProcessName}}    Command name
+    {{CurrentBytes}}   Current RSS in bytes
+    {{MaxBytes}}       Maximum RSS observed in bytes
+    {{CurrentHuman}}   Current RSS in human-readable IEC format
+    {{MaxHuman}}       Maximum RSS in human-readable IEC format
+    {{Timestamp}}      Unix timestamp (seconds since epoch)
+
+EXAMPLE TEMPLATE (JSON line):
+    '{{{{\"pid\":{{Pid}},\"name\":\"{{ProcessName}}\",\"ts\":{{Timestamp}},\"rss\":{{CurrentBytes}} }}}}\\n'
+
+NOTES:
+    • Memory is sampled, not continuously traced — short spikes may be missed.
+    • RSS reflects resident memory only.
+    • Linux only.
+
+Version: {}",
+			version
+		);
+    	process::exit(0);
+    }
+    if args.version_flag{
+    	let version = env!("CARGO_PKG_VERSION");
+    	println!("{}", 	version);
     	process::exit(0);
     }
     
@@ -465,7 +531,7 @@ fn main() {
         	break;
         }
         let target_descendants = find_descendants(&mapping, &args.target_pids);
-        sample.current_bytes = target_descendants.iter().map(read_rss_kb).sum();
+        sample.current_bytes = target_descendants.iter().map(|pid| read_rss_kb(pid, &args.page_size_kib)).sum();
         sample.max_bytes = sample.max_bytes.max(sample.current_bytes);
         sample.timestamp = now();
 		if !args.final_flag{
@@ -491,7 +557,7 @@ fn main() {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::template_engine::format_memory;
+    use crate::template_engine::format_memory_from_kib;
 
     #[test]
     fn test_parse_proc_stat_basic() {
@@ -558,33 +624,33 @@ mod tests {
 
     #[test]
     fn test_format_memory_kb() {
-        assert_eq!(format_memory(512), "512KB");
+        assert_eq!(format_memory_from_kib(512), "512KiB");
     }
 
     #[test]
     fn test_format_memory_mb() {
-        assert_eq!(format_memory(2 * 1024), "2MB");
+        assert_eq!(format_memory_from_kib(2 * 1024), "2MiB");
     }
 
     #[test]
     fn test_format_memory_gb() {
-        assert_eq!(format_memory(2 * 1024 * 1024), "2GB");
+        assert_eq!(format_memory_from_kib(2 * 1024 * 1024), "2GiB");
     }
 
     #[test]
     fn test_format_memory_rounding_behavior() {
-        assert_eq!(format_memory(1536), "1MB");
+        assert_eq!(format_memory_from_kib(1536), "1MiB");
     }
 
     #[test]
     fn test_format_memory_max() {
-        assert_eq!(format_memory(u64::MAX), "15ZB");
+        assert_eq!(format_memory_from_kib(u64::MAX), "15ZiB");
     }
 
     #[test]
     fn test_parse_statm_valid() {
         let input = "100 50 0 0 0 0 0";
-        assert_eq!(parse_statm(input.to_string()).ok(), Some(200));
+        assert_eq!(parse_statm(input.to_string()).ok(), Some(50));
     }
 
     #[test]
@@ -644,6 +710,30 @@ mod tests {
 
         let parsed = parse_args(&argv).unwrap();
         assert!(parsed.help_flag);
+    }
+
+     #[test]
+    fn version_flag_only() {
+        let argv = args(&["memimpact", "--version"]);
+
+        let parsed = parse_args(&argv).unwrap();
+        assert!(parsed.version_flag);
+    }
+
+    #[test]
+    fn help_flag_only_short() {
+        let argv = args(&["memimpact", "-h"]);
+
+        let parsed = parse_args(&argv).unwrap();
+        assert!(parsed.help_flag);
+    }
+
+     #[test]
+    fn version_flag_only_short() {
+        let argv = args(&["memimpact", "-v"]);
+
+        let parsed = parse_args(&argv).unwrap();
+        assert!(parsed.version_flag);
     }
 
     #[test]
