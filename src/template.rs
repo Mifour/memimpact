@@ -2,9 +2,9 @@ pub mod template_engine{
 	use std::str::FromStr;
 	use std::fmt::Write;
 
-	pub fn format_memory(value: u64) -> String{
+	pub fn format_memory_from_kib(value: u64) -> String{
 		// every possible u64 values are handled, it is impossible to be stuck in an infinite loop
-		const UNITS: [&str; 7] = ["KB", "MB", "GB", "TB", "PB", "EB", "ZB"];
+		const UNITS: [&str; 7] = ["KiB", "MiB", "GiB", "TiB", "PiB", "EiB", "ZiB"];
 	    let mut current = value;
 	    let mut unit_index = 0;
 	    while current >= 1024 && unit_index < UNITS.len() - 1 {
@@ -91,27 +91,70 @@ pub mod template_engine{
 	
 	impl Template {
 	    pub fn parse(input: &str) -> Result<Self, String> {
-		    let mut tokens = Vec::new();
-		    let mut rest = input;
+	    	let mut tokens = Vec::new();
+   	        let mut literal = String::new();
+   	        let mut chars = input.chars().peekable();
 
-		    while let Some(start) = rest.find('{') {
-		        let (before, after_start) = rest.split_at(start);
+   	        while let Some(c) = chars.next() {
+   	            match c {
+   	                '{' => {
+   	                    if chars.peek() == Some(&'{') {
+   	                        // Escaped literal "{"
+   	                        chars.next();
+   	                        literal.push('{');
+   	                        continue;
+   	                    }
+   	
+   	                    // Flush literal before placeholder
+   	                    if !literal.is_empty() {
+   	                        tokens.push(Token::Literal(std::mem::take(&mut literal)));
+   	                    }
+   	
+   	                    // Read placeholder name
+   	                    let mut name = String::new();
+   	                    let mut closed = false;
+   	                    
+   	                    for next in chars.by_ref() {
+   	                        if next == '}' {
+   	                            closed = true;
+   	                            break;
+   	                        }
+   	                        name.push(next);
+   	                        //chars.next();
+   	                    }
 
-		        if !before.is_empty() {
-		            tokens.push(Token::Literal(before.to_string()));
-		        }
+   	                    if !closed {
+   	                        return Err("Unclosed placeholder".into());
+   	                    }
+   	
+   	                    if name.is_empty() {
+   	                        return Err("Empty placeholder {}".into());
+   	                    }
+   	
+   	                    let field = Field::from_str(&name)?;
+   	                    tokens.push(Token::Placeholder(Placeholder { field }));
+   	                }
 
-		        let end = after_start.find('}')
-		            .ok_or("Unclosed placeholder")?;
-		        let inside = &after_start[1..end];
-		        let field = Field::from_str(inside)?;
-		        tokens.push(Token::Placeholder(Placeholder{field}));
-		        rest = &after_start[end + 1..];
-		    }
-		    if !rest.is_empty() {
-		        tokens.push(Token::Literal(rest.to_string()));
-		    }
-		    Ok(Self { tokens })
+   	
+   	                '}' => {
+   	                    if chars.peek() == Some(&'}') {
+   	                        // Escaped literal "}"
+   	                        chars.next();
+   	                        literal.push('}');
+   	                    } else {
+   	                        return Err("Unmatched '}'".into());
+   	                    }
+   	                }
+   	
+   	                _ => literal.push(c),
+   	            }
+   	        }
+   	
+   	        if !literal.is_empty() {
+   	            tokens.push(Token::Literal(literal));
+   	        }
+   	
+   	        Ok(Self { tokens })
 		}
 
 	    pub fn render(&self, sample: &MemorySample, out: &mut String) -> std::fmt::Result{
@@ -124,8 +167,8 @@ pub mod template_engine{
 	                        Field::ProcessName => out.push_str(sample.process_name),
 	                        Field::CurrentBytes => write!(out, "{}", sample.current_bytes)?,
 	                        Field::MaxBytes => write!(out, "{}", sample.max_bytes)?,
-	                        Field::CurrentHuman => write!(out, "{}",format_memory(sample.current_bytes))?,
-	                        Field::MaxHuman => write!(out, "{}", format_memory(sample.max_bytes))?,
+	                        Field::CurrentHuman => write!(out, "{}",format_memory_from_kib(sample.current_bytes))?,
+	                        Field::MaxHuman => write!(out, "{}", format_memory_from_kib(sample.max_bytes))?,
 	                        Field::Timestamp => write!(out, "{}", sample.timestamp)?,
 	                    }
                     }
@@ -159,16 +202,16 @@ mod tests {
 
     #[test]
     fn format_memory_basic_units() {
-        assert_eq!(format_memory(0), "0KB");
-        assert_eq!(format_memory(1023), "1023KB");
-        assert_eq!(format_memory(1024), "1MB");
-        assert_eq!(format_memory(1024 * 1024), "1GB");
+        assert_eq!(format_memory_from_kib(0), "0KiB");
+        assert_eq!(format_memory_from_kib(1023), "1023KiB");
+        assert_eq!(format_memory_from_kib(1024), "1MiB");
+        assert_eq!(format_memory_from_kib(1024 * 1024), "1GiB");
     }
 
     #[test]
     fn format_memory_large_values() {
-        assert_eq!(format_memory(1024u64.pow(4)), "1PB");
-        assert_eq!(format_memory(1024u64.pow(5)), "1EB");
+        assert_eq!(format_memory_from_kib(1024u64.pow(4)), "1PiB");
+        assert_eq!(format_memory_from_kib(1024u64.pow(5)), "1EiB");
     }
 
     // ---------------------------
@@ -254,7 +297,7 @@ mod tests {
         let mut out = String::new();
         t.render(&sample(), &mut out).unwrap();
 
-        assert_eq!(out, "10GB 2TB"); 
+        assert_eq!(out, "10GiB 2TiB"); 
         // NOTE: This reflects your bitshift logic, not real-world units.
     }
 
@@ -288,4 +331,40 @@ mod tests {
 
         assert_eq!(out, "4242firefox");
     }
+
+    #[test]
+    fn parse_escaped_open_brace() {
+        let t = Template::parse("{{").unwrap();
+        assert!(matches!(t.tokens[0], Token::Literal(ref s) if s == "{"));
+    }
+    
+    #[test]
+    fn parse_escaped_close_brace() {
+        let t = Template::parse("}}").unwrap();
+        assert!(matches!(t.tokens[0], Token::Literal(ref s) if s == "}"));
+    }
+    
+    #[test]
+    fn parse_literal_json() {
+        let t = Template::parse(r#"{{"pid": {Pid}}}"#).unwrap();
+        let mut out = String::new();
+        t.render(&sample(), &mut out).unwrap();
+        assert_eq!(out, r#"{"pid": 4242}"#);
+    }
+
+    #[test]
+    fn error_if_placeholder_not_closed() {
+        assert!(Template::parse("hello {Pid").is_err());
+    }
+    
+    #[test]
+    fn error_if_single_closing_brace() {
+        assert!(Template::parse("hello } world").is_err());
+    }
+    
+    #[test]
+    fn error_if_empty_placeholder() {
+        assert!(Template::parse("{}").is_err());
+    }
+    
 }
