@@ -10,6 +10,13 @@ MemImpact answers:
 
 without requiring instrumentation, recompilation, or heavyweight tooling.  
 
+## Demo
+
+<p align="center">
+  <img src="assets/demo.svg" />
+</p>
+
+
 ### What MemImpact is
 - A process memory monitor
 - A peak RSS estimator
